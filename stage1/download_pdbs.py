@@ -30,11 +30,22 @@ URL = "https://files.rcsb.org/download/{}.pdb"
 def ids_from_manifest(p: Path) -> list[str]:
     import pandas as pd
     m = pd.read_csv(p, keep_default_na=False)
-    col = "pdb" if "pdb" in m.columns else "chain_key"
-    if col == "pdb":
-        ids = m["pdb"].astype(str).str.upper()
-    else:  # chain_key like 1A9UA -> first 4 chars
-        ids = m["chain_key"].astype(str).str.upper().str[:4]
+    # Prefer pdb when present and non-empty; otherwise fall back to chain_key[:4]
+    # (v9_addendum_merged.csv has a pdb column that is entirely blank).
+    ids: list[str] = []
+    has_pdb = "pdb" in m.columns
+    has_ck = "chain_key" in m.columns
+    if not has_pdb and not has_ck:
+        raise SystemExit(f"No pdb or chain_key column in {p}")
+    for _, row in m.iterrows():
+        pdb = str(row["pdb"]).strip().upper() if has_pdb else ""
+        if len(pdb) == 4:
+            ids.append(pdb)
+            continue
+        if has_ck:
+            ck = str(row["chain_key"]).strip().upper()
+            if len(ck) >= 4:
+                ids.append(ck[:4])
     return sorted(set(i for i in ids if len(i) == 4))
 
 
