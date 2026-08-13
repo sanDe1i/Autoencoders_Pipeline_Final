@@ -1,7 +1,12 @@
-"""Train LightGBM on non-loop conserved Cα-Cα distances → predict v9 AE latent.
+"""Train LightGBM on non-loop conserved Cα-Cα distances → predict AE latent (z0, z1).
 
-Then compute feature importance (gain + split) and SHAP values, and
-produce figures suitable for the manuscript HTML report.
+Default split matches the SE3 trainer (q6_train_dm_ae.py --split gene):
+  fit on ae_split ∈ {train, val}, report R² / SHAP on ae_split == test
+  (held-out kinases). Column-mean imputation is fit on the LGBM training
+  rows only — same hygiene as the AE's train-only μ/σ.
+
+``--split random`` is the old 90/10 chain split (interpolation / near-duplicate
+chains of the same kinase). Do not quote that R² as new-kinase generalisation.
 
 Output figures (all under ``--out/figures/``):
   - lgbm_predicted_vs_actual.png    — scatter of predicted vs actual z0, z1
@@ -14,7 +19,6 @@ Output figures (all under ``--out/figures/``):
   - lgbm_residue_importance.png     — per-BRAF-residue aggregated SHAP (sum |abs|)
   - lgbm_feature_pairs_top.csv      — top-200 features by combined |SHAP|
 
-Plus model_comparison.csv with full cross-validated R² breakdown.
 """
 
 from __future__ import annotations
@@ -122,10 +126,22 @@ def build_distance_matrix(conserved_csv: Path, manifest_csv: Path,
     # collapse to the centroid prediction and form a horizontal band in
     # the predicted-vs-actual scatter (residual form of the v9 "stripe").
     frac_imputed = np.isnan(X).mean(axis=1)
-    col_mean = np.nanmean(X, axis=0)
-    inds = np.where(np.isnan(X))
-    X[inds] = np.take(col_mean, inds[1])
     return X, manifest, pair_list, frac_imputed
+
+
+def impute_from_train(X_train: np.ndarray, others: list[np.ndarray]):
+    """Fill NaNs with column means computed on *training* rows only."""
+    col_mean = np.nanmean(X_train, axis=0)
+    col_mean = np.nan_to_num(col_mean, nan=0.0)
+
+    def _fill(X):
+        out = np.array(X, copy=True)
+        nan = np.isnan(out)
+        if nan.any():
+            out[nan] = np.take(col_mean, np.where(nan)[1])
+        return out
+
+    return _fill(X_train), [_fill(X) for X in others], col_mean
 
 
 def main():
@@ -147,6 +163,12 @@ def main():
     ap.add_argument("--num-leaves", type=int, default=31)
     ap.add_argument("--seed", type=int, default=25)
     ap.add_argument("--n-top", type=int, default=20)
+    ap.add_argument(
+        "--split", choices=("ae", "random"), default="ae",
+        help="ae = fit on AE train+val genes, report on AE test genes "
+             "(default; matches q6_train_dm_ae.py --split gene). "
+             "random = 90/10 chain split (interpolation, not new-kinase).",
+    )
     args = ap.parse_args()
 
     args.out.mkdir(parents=True, exist_ok=True)
@@ -190,16 +212,49 @@ def main():
     keep_mask = np.array([k in latent.index for k in keys])
     X = X[keep_mask]
     keys = [k for k in keys if k in latent.index]
+    if latent.index.duplicated().any():
+        raise SystemExit("latent CSV has duplicate chain_key")
     Y = latent.loc[keys, ["z0", "z1"]].to_numpy(dtype=np.float32)
     print(f"X={X.shape}, Y={Y.shape}")
 
-    # Split.
-    rng = np.random.default_rng(args.seed)
-    perm = rng.permutation(len(X))
-    n_test = int(len(X) * 0.1)
-    test = perm[:n_test]; train = perm[n_test:]
-    X_train, X_test = X[train], X[test]
+    # Split (ae = same gene holdout as q6_train_dm_ae.py; random = old 90/10).
+    if args.split == "ae":
+        if "ae_split" not in latent.columns:
+            raise SystemExit(
+                "latent CSV has no ae_split column; join Stage4 SE3 latent "
+                "or pass --split random")
+        split_labels = np.array([str(latent.loc[k, "ae_split"]).strip()
+                                 for k in keys])
+        train = np.where(np.isin(split_labels, ("train", "val")))[0]
+        test = np.where(split_labels == "test")[0]
+        n_ae_train = int((split_labels == "train").sum())
+        n_ae_val = int((split_labels == "val").sum())
+        if len(test) == 0 or len(train) == 0:
+            raise SystemExit(
+                f"ae_split produced empty train ({len(train)}) or test ({len(test)}) "
+                "after coverage filter")
+        claim = "NEW-KINASE holdout (AE test genes)"
+        print(f"AE-split: fit on train+val n={len(train)} "
+              f"(train={n_ae_train} val={n_ae_val}); "
+              f"report on test n={len(test)}  [{claim}]", flush=True)
+        if "gene" in latent.columns:
+            test_genes = sorted({str(latent.loc[keys[i], "gene"])
+                                 for i in test})
+            print(f"  LGBM test genes ({len(test_genes)}): {test_genes}",
+                  flush=True)
+    else:
+        rng = np.random.default_rng(args.seed)
+        perm = rng.permutation(len(X))
+        n_test = int(len(X) * 0.1)
+        test = perm[:n_test]
+        train = perm[n_test:]
+        claim = "RANDOM-CHAIN holdout (not new-kinase gen.)"
+        print(f"Random 90/10: train n={len(train)} test n={len(test)}  [{claim}]",
+              flush=True)
+
+    X_train, (X_test,), _ = impute_from_train(X[train], [X[test]])
     Y_train, Y_test = Y[train], Y[test]
+    test_keys = [keys[i] for i in test]
 
     # Train two LightGBM models, one per target.
     import lightgbm as lgb
@@ -233,10 +288,16 @@ def main():
     print(f"Combined R²: {combined_r2:.3f}")
 
     # ---------- Export test predictions (for external/MATLAB plotting) ----------
-    pd.DataFrame({
+    pred_df = {
+        "chain_key": test_keys,
         "actual_z0": Y_test[:, 0], "pred_z0": preds[:, 0],
         "actual_z1": Y_test[:, 1], "pred_z1": preds[:, 1],
-    }).to_csv(args.out / "lgbm_test_predictions.csv", index=False)
+    }
+    if "gene" in latent.columns:
+        pred_df["gene"] = [str(latent.loc[k, "gene"]) for k in test_keys]
+    if "ae_split" in latent.columns:
+        pred_df["ae_split"] = [str(latent.loc[k, "ae_split"]) for k in test_keys]
+    pd.DataFrame(pred_df).to_csv(args.out / "lgbm_test_predictions.csv", index=False)
 
     # ---------- Predicted vs actual scatter ----------
     fig, axes = plt.subplots(1, 2, figsize=(11, 5))
@@ -252,8 +313,11 @@ def main():
         axes[j].set_xlabel(f"Actual {name}")
         axes[j].set_ylabel(f"Predicted {name}")
         axes[j].set_title(f"{name}: R² = {r2:.3f}")
-    fig.suptitle("LightGBM predicting v9.1 latent from non-loop conserved distances",
-                 fontsize=14)
+    fig.suptitle(
+        f"LightGBM predicting SE3 latent from non-loop conserved distances\n"
+        f"({claim})",
+        fontsize=13,
+    )
     fig.tight_layout()
     fig.savefig(fig_dir / "lgbm_predicted_vs_actual.png")
     plt.close(fig)
@@ -388,6 +452,8 @@ def main():
     # Summary CSV
     pd.DataFrame([{
         "model": "LightGBM",
+        "split": args.split,
+        "claim": claim,
         "n_train": int(len(train)),
         "n_test": int(len(test)),
         "n_features": int(X.shape[1]),
