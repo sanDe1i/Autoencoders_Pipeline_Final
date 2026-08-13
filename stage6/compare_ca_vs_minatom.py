@@ -28,6 +28,7 @@ Outputs (under --out):
 from __future__ import annotations
 
 import argparse
+import sys
 from collections import defaultdict
 from pathlib import Path
 
@@ -37,6 +38,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from scipy.stats import pearsonr
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "stage5"))
+from predict_v9_lgbm_shap import impute_from_train  # noqa: E402
 
 plt.rcParams.update({
     "font.family": "sans-serif",
@@ -149,12 +153,8 @@ def build_matrices(conserved_csv: Path, manifest_csv: Path,
     X_ca = X_ca[:, keep]
     X_min = X_min[:, keep]
     pair_list = [p for p, k in zip(pair_list, keep) if k]
-    # mean-impute
-    for X in (X_ca, X_min):
-        col_mean = np.nanmean(X, axis=0)
-        inds = np.where(np.isnan(X))
-        X[inds] = np.take(col_mean, inds[1])
-    return X_ca, X_min, manifest, pair_list
+    frac_imputed = np.isnan(X_ca).mean(axis=1)
+    return X_ca, X_min, manifest, pair_list, frac_imputed
 
 
 def per_feature_correlation(X_ca, X_min, pair_list, out: Path):
@@ -185,23 +185,34 @@ def per_feature_correlation(X_ca, X_min, pair_list, out: Path):
     return df
 
 
+def _fill_global(X):
+    out = np.array(X, copy=True)
+    col = np.nan_to_num(np.nanmean(out, axis=0), nan=0.0)
+    nan = np.isnan(out)
+    if nan.any():
+        out[nan] = np.take(col, np.where(nan)[1])
+    return out
+
+
 def train_lgbm_both(X_ca, X_min, latent_csv: Path, manifest: pd.DataFrame,
-                    seed: int, out: Path, conserved_csv: Path):
+                    seed: int, out: Path, conserved_csv: Path,
+                    frac_imputed: np.ndarray, max_imputed_frac: float):
     """Train identical LightGBM on each feature matrix; report R²."""
     import lightgbm as lgb
     from sklearn.metrics import r2_score
-    # Drop chains with no FoldMason mapping (same logic as
-    # predict_v9_lgbm_shap.py)
     cons = pd.read_csv(conserved_csv, keep_default_na=False)
     cons["chain_key"] = norm_key(cons["chain_key"])
     mapped = set(cons["chain_key"].unique())
     manifest_keys = manifest["chain_key"].astype(str).str.upper().values
     has_mapping = np.array([k in mapped for k in manifest_keys])
-    X_ca = X_ca[has_mapping]
-    X_min = X_min[has_mapping]
-    manifest = manifest[has_mapping].reset_index(drop=True)
-    print(f"After dropping no-mapping chains: {X_ca.shape}")
-    # Target alignment
+    well = frac_imputed <= max_imputed_frac
+    keep = has_mapping & well
+    print(f"Dropping {int((~has_mapping).sum())} unmapped; "
+          f"{int((has_mapping & ~well).sum())} high-impute chains")
+    X_ca = X_ca[keep]
+    X_min = X_min[keep]
+    manifest = manifest[keep].reset_index(drop=True)
+    print(f"After coverage filter: {X_ca.shape}")
     latent = pd.read_csv(latent_csv, keep_default_na=False)
     latent["chain_key"] = latent["chain_key"].astype(str).str.upper()
     latent = latent.set_index("chain_key")
@@ -214,18 +225,27 @@ def train_lgbm_both(X_ca, X_min, latent_csv: Path, manifest: pd.DataFrame,
     perm = rng.permutation(len(Y))
     n_test = int(len(Y) * 0.1)
     test = perm[:n_test]; train = perm[n_test:]
+    print(f"Random 90/10 for Cα vs min-atom: train {len(train)} test {len(test)} "
+          f"[FI interpolation; not new-kinase]", flush=True)
+
+    filled = {}
+    Xca_tr, (Xca_te,), _ = impute_from_train(X_ca[train], [X_ca[test]])
+    Xmin_tr, (Xmin_te,), _ = impute_from_train(X_min[train], [X_min[test]])
+    filled["ca"] = (Xca_tr, Xca_te)
+    filled["min"] = (Xmin_tr, Xmin_te)
 
     rows = []
     importance = {"ca": {}, "min": {}}
-    for name, X in (("ca", X_ca), ("min", X_min)):
+    for name in ("ca", "min"):
+        Xtr, Xte = filled[name]
         for j, t in enumerate(["z0", "z1"]):
             m = lgb.LGBMRegressor(
                 n_estimators=400, num_leaves=31, learning_rate=0.05,
                 min_data_in_leaf=20, feature_fraction=0.9,
                 bagging_fraction=0.9, bagging_freq=5,
                 random_state=seed, n_jobs=-1, verbose=-1)
-            m.fit(X[train], Y[train, j])
-            p = m.predict(X[test])
+            m.fit(Xtr, Y[train, j])
+            p = m.predict(Xte)
             r2 = r2_score(Y[test, j], p)
             rows.append({"feature_set": name, "target": t, "r2_test": r2})
             print(f"  {name:3s} target {t}: R²_test = {r2:.4f}")
@@ -357,30 +377,33 @@ def main():
     ap.add_argument("--ref-chain-key", default="6UANC")
     ap.add_argument("--ape-resi-floor", type=int, default=624)
     ap.add_argument("--min-pair-coverage", type=float, default=0.75)
+    ap.add_argument("--max-imputed-frac", type=float, default=0.5)
     ap.add_argument("--seed", type=int, default=25)
     args = ap.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
     fig_dir = args.out / "figures"; fig_dir.mkdir(exist_ok=True)
 
     print("=== Building feature matrices (Cα-Cα and min-atom) ===")
-    X_ca, X_min, manifest, pair_list = build_matrices(
+    X_ca, X_min, manifest, pair_list, frac_imputed = build_matrices(
         args.conserved_csv, args.manifest_csv, args.full_pdb_dir,
         args.ref_chain_key, args.ape_resi_floor, args.min_pair_coverage)
 
-    # Save matrices for downstream reuse
+    X_ca_f, X_min_f = _fill_global(X_ca), _fill_global(X_min)
     np.savez_compressed(args.out / "matrices.npz",
-                         X_ca=X_ca, X_min=X_min,
+                         X_ca=X_ca_f, X_min=X_min_f,
                          chain_keys=np.array(manifest["chain_key"]),
                          pair_list=np.array(pair_list, dtype=np.int32))
     print(f"\nSaved matrices.npz "
-          f"(X_ca {X_ca.shape}, X_min {X_min.shape})")
+          f"(X_ca {X_ca_f.shape}, X_min {X_min_f.shape})")
 
     print("\n=== Per-feature correlation ===")
-    corr_df = per_feature_correlation(X_ca, X_min, pair_list, args.out)
+    corr_df = per_feature_correlation(X_ca_f, X_min_f, pair_list, args.out)
 
     print("\n=== Training LightGBM on each feature set ===")
-    importance = train_lgbm_both(X_ca, X_min, args.latent_csv, manifest,
-                                  args.seed, args.out, args.conserved_csv)
+    importance = train_lgbm_both(
+        X_ca, X_min, args.latent_csv, manifest,
+        args.seed, args.out, args.conserved_csv,
+        frac_imputed, args.max_imputed_frac)
     model_df = pd.read_csv(args.out / "ca_vs_minatom_model_comparison.csv")
 
     print("\n=== Top-20 feature overlap ===")

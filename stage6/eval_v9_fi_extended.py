@@ -36,6 +36,7 @@ Outputs (under ``--out``):
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
 import matplotlib
@@ -43,6 +44,11 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "stage5"))
+from predict_v9_lgbm_shap import (  # noqa: E402
+    build_distance_matrix, impute_from_train, norm_key,
+)
 
 plt.rcParams.update({
     "font.family": "sans-serif",
@@ -53,81 +59,6 @@ plt.rcParams.update({
     "savefig.facecolor": "white", "savefig.dpi": 200,
     "savefig.bbox": "tight",
 })
-
-
-def norm_key(s):
-    return s.astype(str).str.upper().str.replace("_", "", regex=False)
-
-
-def read_ca_map(pdb_path: Path, chain: str) -> dict[int, np.ndarray]:
-    out: dict[int, np.ndarray] = {}
-    if not pdb_path.exists():
-        return out
-    with pdb_path.open() as f:
-        for line in f:
-            if not line.startswith("ATOM") or line[21] != chain:
-                continue
-            if line[12:16].strip() != "CA":
-                continue
-            if line[16].strip() not in {"", "A"}:
-                continue
-            try:
-                resi = int(line[22:26])
-            except ValueError:
-                continue
-            out[resi] = np.array(
-                [float(line[30:38]), float(line[38:46]), float(line[46:54])],
-                dtype=np.float32,
-            )
-    return out
-
-
-def build_distance_matrix(conserved_csv, manifest_csv, full_pdb_dir,
-                          ref_chain_key, ape_resi_floor, min_pair_coverage):
-    conserved = pd.read_csv(conserved_csv, keep_default_na=False)
-    conserved["chain_key"] = norm_key(conserved["chain_key"])
-    ref = conserved[conserved["chain_key"] == ref_chain_key.upper()].copy()
-    ref["pdb_resi"] = ref["pdb_resi"].astype(int)
-    ref = ref[ref["pdb_resi"] < ape_resi_floor]
-    braf_resis = sorted(ref["pdb_resi"].unique().tolist())
-    pair_list = [(braf_resis[i], braf_resis[j])
-                 for i in range(len(braf_resis))
-                 for j in range(i + 1, len(braf_resis))]
-
-    manifest = pd.read_csv(manifest_csv, keep_default_na=False)
-    manifest["chain_key"] = manifest["chain_key"].astype(str).str.upper()
-    chain_maps = (
-        conserved.groupby("chain_key")
-        .apply(lambda g: dict(zip(g["braf_resi"].astype(int),
-                                  g["pdb_resi"].astype(int))))
-    ).to_dict()
-
-    n = len(manifest)
-    X = np.full((n, len(pair_list)), np.nan, dtype=np.float32)
-    for ii in range(n):
-        if ii % 500 == 0:
-            print(f"  loading chain {ii}/{n}")
-        row = manifest.iloc[ii]
-        cmap = chain_maps.get(row["chain_key"])
-        if cmap is None:
-            continue
-        cas = read_ca_map(full_pdb_dir / f"{row['pdb']}.pdb", row["chain"])
-        for jj, (ri, rj) in enumerate(pair_list):
-            pi = cmap.get(ri); pj = cmap.get(rj)
-            if pi is None or pj is None:
-                continue
-            ci = cas.get(pi); cj = cas.get(pj)
-            if ci is None or cj is None:
-                continue
-            X[ii, jj] = float(np.linalg.norm(ci - cj))
-    coverage = (~np.isnan(X)).mean(axis=0)
-    keep = coverage >= min_pair_coverage
-    X = X[:, keep]
-    pair_list = [p for p, k in zip(pair_list, keep) if k]
-    col_mean = np.nanmean(X, axis=0)
-    inds = np.where(np.isnan(X))
-    X[inds] = np.take(col_mean, inds[1])
-    return X, manifest, pair_list
 
 
 def per_axis_r2(y_true, y_pred):
@@ -150,29 +81,39 @@ def main():
     ap.add_argument("--ref-chain-key", default="6UANC")
     ap.add_argument("--ape-resi-floor", type=int, default=624)
     ap.add_argument("--min-pair-coverage", type=float, default=0.75)
+    ap.add_argument("--max-imputed-frac", type=float, default=0.5,
+                    help="Drop chains whose conserved-distance features "
+                         "are >this fraction mean-imputed (Stage5 band fix).")
     ap.add_argument("--seed", type=int, default=25)
+    ap.add_argument(
+        "--split", choices=("random", "ae"), default="random",
+        help="random = 90/10 chain split (default for FI: needs a model "
+             "that actually predicts z). ae = AE test genes (weak R²; "
+             "do not use for SHAP/FI headlines).",
+    )
     args = ap.parse_args()
 
     args.out.mkdir(parents=True, exist_ok=True)
 
     # Build features.
     print("Building distance matrix")
-    X, manifest, pairs = build_distance_matrix(
+    X, manifest, pairs, frac_imputed = build_distance_matrix(
         args.conserved_csv, args.manifest_csv, args.full_pdb_dir,
         args.ref_chain_key, args.ape_resi_floor, args.min_pair_coverage,
     )
     feature_names = [f"d_{a}_{b}" for a, b in pairs]
 
-    # BUG-FIX 2026-05-27: drop chains with no FoldMason mapping
     conserved_df = pd.read_csv(args.conserved_csv, keep_default_na=False)
     conserved_df["chain_key"] = norm_key(conserved_df["chain_key"])
     mapped_keys = set(conserved_df["chain_key"].unique())
     has_mapping = manifest["chain_key"].str.upper().isin(mapped_keys).values
-    n_drop = int((~has_mapping).sum())
-    if n_drop:
-        print(f"Dropping {n_drop} chains with no FoldMason mapping")
-    X = X[has_mapping]
-    manifest = manifest[has_mapping].reset_index(drop=True)
+    well_covered = frac_imputed <= args.max_imputed_frac
+    keep_chain = has_mapping & well_covered
+    print(f"Dropping {int((~has_mapping).sum())} chains with no FoldMason "
+          f"mapping; {int((has_mapping & ~well_covered).sum())} more with "
+          f">{args.max_imputed_frac*100:.0f}% imputed features.")
+    X = X[keep_chain]
+    manifest = manifest[keep_chain].reset_index(drop=True)
 
     n_features = X.shape[1]
     print(f"Cleaned X={X.shape}")
@@ -180,6 +121,8 @@ def main():
     # Targets.
     latent = pd.read_csv(args.latent_csv, keep_default_na=False)
     latent["chain_key"] = latent["chain_key"].astype(str).str.upper()
+    if latent["chain_key"].duplicated().any():
+        raise SystemExit("latent CSV has duplicate chain_key")
     latent = latent.set_index("chain_key")
     keys = manifest["chain_key"].tolist()
     mask = np.array([k in latent.index for k in keys])
@@ -188,13 +131,35 @@ def main():
     Y = latent.loc[keys, ["z0", "z1"]].to_numpy(dtype=np.float32)
     dfg_labels = latent.loc[keys, "dfg_spatial"].fillna("None").astype(str).values
 
-    # Split.
-    rng = np.random.default_rng(args.seed)
-    perm = rng.permutation(len(X))
-    n_test = int(len(X) * 0.1)
-    test = perm[:n_test]; train = perm[n_test:]
-    Xtr, Xte = X[train], X[test]
+    # Split. Default random: FI needs a model that predicts z (Stage5
+    # random R² ~0.91). --split ae is the gene holdout (R² ~0.4) and is
+    # the wrong model for SHAP/gain headlines.
+    if args.split == "ae":
+        if "ae_split" not in latent.columns:
+            raise SystemExit("latent CSV has no ae_split; use --split random")
+        split_labels = np.array([str(latent.loc[k, "ae_split"]).strip()
+                                 for k in keys])
+        train = np.where(np.isin(split_labels, ("train", "val")))[0]
+        test = np.where(split_labels == "test")[0]
+        claim = "NEW-KINASE holdout (weak R²; FI less reliable)"
+        print(f"AE-split: fit n={len(train)}  test n={len(test)}  [{claim}]",
+              flush=True)
+    else:
+        rng = np.random.default_rng(args.seed)
+        perm = rng.permutation(len(X))
+        n_test = int(len(X) * 0.1)
+        test = perm[:n_test]
+        train = perm[n_test:]
+        claim = "RANDOM-CHAIN holdout (FI interpolation model)"
+        print(f"Random 90/10: train n={len(train)} test n={len(test)}  [{claim}]",
+              flush=True)
+
+    Xtr, (Xte,), col_mean = impute_from_train(X[train], [X[test]])
     Ytr, Yte = Y[train], Y[test]
+    X_filled = np.array(X, copy=True)
+    nan = np.isnan(X_filled)
+    if nan.any():
+        X_filled[nan] = np.take(col_mean, np.where(nan)[1])
 
     # Standardise (for ridge).
     from sklearn.preprocessing import StandardScaler
@@ -368,7 +333,7 @@ def main():
                                ("DFGinter", "#6ACC64")]:
                 m = (dfg_labels == cls)
                 if m.sum() == 0: continue
-                ax.hist(X[m, fi], bins=40, alpha=0.55, density=True,
+                ax.hist(X_filled[m, fi], bins=40, alpha=0.55, density=True,
                         label=f"{cls} (n={m.sum()})", color=color)
             ri, rj = pairs[fi]
             ax.set_xlabel(f"d({ri},{rj}) [Å]")
@@ -387,8 +352,6 @@ def main():
     from sklearn.linear_model import LogisticRegression
     from sklearn.metrics import balanced_accuracy_score
     valid = (dfg_labels != "None") & (dfg_labels != "")
-    Xv = X[valid]; yv = dfg_labels[valid]
-    # split
     tr_v = np.intersect1d(np.where(valid)[0], train)
     te_v = np.intersect1d(np.where(valid)[0], test)
     rows = []
@@ -420,8 +383,8 @@ def main():
         for method_name, imp in combined.items():
             top = np.argsort(-imp)[:N]
             clf = _dfg_probe()
-            clf.fit(X[tr_v][:, top], dfg_labels[tr_v])
-            yhat = clf.predict(X[te_v][:, top])
+            clf.fit(X_filled[tr_v][:, top], dfg_labels[tr_v])
+            yhat = clf.predict(X_filled[te_v][:, top])
             bal = balanced_accuracy_score(dfg_labels[te_v], yhat)
             rows.append({"method": method_name, "N": N, "bal_acc": float(bal)})
         # random baseline
@@ -429,8 +392,8 @@ def main():
         for _ in range(5):
             top = rng2.permutation(n_features)[:N]
             clf = _dfg_probe()
-            clf.fit(X[tr_v][:, top], dfg_labels[tr_v])
-            yhat = clf.predict(X[te_v][:, top])
+            clf.fit(X_filled[tr_v][:, top], dfg_labels[tr_v])
+            yhat = clf.predict(X_filled[te_v][:, top])
             random_accs.append(balanced_accuracy_score(dfg_labels[te_v], yhat))
         rows.append({"method": "random", "N": N,
                      "bal_acc": float(np.mean(random_accs))})
@@ -463,6 +426,7 @@ def main():
 
     # ---------- Headline numbers ----------
     print("\n========= SUMMARY =========")
+    print(f"split={args.split}  [{claim}]")
     print(f"LightGBM z0 R² = {lgb_r2[0]:.3f}, z1 R² = {lgb_r2[1]:.3f}")
     print(f"Ridge    z0 R² = {ridge_r2[0]:.3f}, z1 R² = {ridge_r2[1]:.3f}")
     print(f"RF       z0 R² = {rf_r2[0]:.3f}, z1 R² = {rf_r2[1]:.3f}")

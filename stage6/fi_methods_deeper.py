@@ -335,12 +335,9 @@ def plot_cluster_vs_pair(clust_df_all: pd.DataFrame,
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--extended-fi-csv", required=True, type=Path)
-    ap.add_argument("--pair-agreement-csv-glob",
-                    default="../../manuscript_draft/data/v9_lgbm_shap/"
-                            "fi_methods_agreement/"
-                            "fi_method_agreement_z?.csv",
-                    help="Glob for the pair-level Jaccard CSVs from the "
-                         "earlier analysis")
+    ap.add_argument("--pair-agreement-csv-glob", default=None,
+                    help="Glob for fi_method_agreement_z?.csv from "
+                         "fi_methods_agreement.py. Default: <out>/fi_method_agreement_z?.csv")
     ap.add_argument("--out", required=True, type=Path)
     ap.add_argument("--n-boot", type=int, default=20)
     args = ap.parse_args()
@@ -366,7 +363,10 @@ def main():
     clust_df.to_csv(args.out / "fi_cluster_level_agreement.csv", index=False)
 
     from glob import glob
-    pa_files = sorted(glob(str(args.pair_agreement_csv_glob)))
+    glob_pat = (args.pair_agreement_csv_glob
+                if args.pair_agreement_csv_glob
+                else str(args.out / "fi_method_agreement_z?.csv"))
+    pa_files = sorted(glob(glob_pat))
     if pa_files:
         pair_agreement = pd.concat([pd.read_csv(p) for p in pa_files],
                                     ignore_index=True)
