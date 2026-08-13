@@ -213,7 +213,7 @@ def main():
             color="#315f8e", alpha=0.75, edgecolor="white")
     ax.axvline(compactness["p95_radius_from_centroid"].median(),
                color="grey", ls="--",
-               label=f"median: {compactness['p95_radius_from_centroid'].median():.0f}")
+               label=f"median: {compactness['p95_radius_from_centroid'].median():.3f}")
     ax.set_xlabel("p95 latent radius from per-gene centroid")
     ax.set_ylabel(f"genes (n={len(compactness)})")
     ax.set_title("(A) Per-kinase conformational compactness\n"

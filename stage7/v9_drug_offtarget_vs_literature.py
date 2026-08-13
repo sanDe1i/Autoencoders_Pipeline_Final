@@ -51,6 +51,8 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -227,8 +229,8 @@ def main():
         axA.set_xscale("log")
         axA.set_xlabel("Davis 2011 S(3 uM)  -- verified from Suppl Table 5 "
                        "(log scale, lower = more selective)")
-        axA.set_ylabel("v9 latent on→off centroid separation")
-        axA.set_title("A.  v9 latent off-target metric vs verified Davis 2011 "
+        axA.set_ylabel("SE3 latent on→off centroid separation")
+        axA.set_title("A.  SE3 latent off-target metric vs verified Davis 2011 "
                       "S(3 uM)", loc="left")
         axA.scatter([], [], s=70, color="#C00000", edgecolor="black",
                     linewidth=0.5,

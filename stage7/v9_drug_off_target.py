@@ -26,6 +26,8 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -233,7 +235,7 @@ def main():
                     (midx, midy), fontsize=8, color=c, zorder=5)
     ax.set_xlabel("z0"); ax.set_ylabel("z1")
     ax.set_title("Per-drug on-target (solid) vs off-target (hollow) "
-                 "centroid in v9 latent",
+                 "centroid in SE3 latent",
                  loc="left")
     fig.tight_layout()
     for ext in ("png", "pdf"):

@@ -28,6 +28,8 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -309,7 +311,7 @@ def main():
                    linewidth=1.5, zorder=5)
     ax.set_xlabel("z0")
     ax.set_ylabel("z1")
-    ax.set_title("Per-drug latent footprints on v9", loc="left")
+    ax.set_title("Per-drug latent footprints (SE3 DM-AE)", loc="left")
     ax.legend(loc="upper left", fontsize=8, markerscale=0.9,
               bbox_to_anchor=(1.01, 1.0))
     fig.tight_layout()
@@ -326,15 +328,20 @@ def main():
     labels = [f"{r['name']} ({r['ccd']})" for _, r in summary_sorted.iterrows()]
     ax.barh(range(len(summary_sorted)), summary_sorted["dispersion"],
             color=colours, edgecolor="black", linewidth=0.4)
+    # Offset labels in units of the dispersion axis (SE3 latent ~0.1–1;
+    # old FoldingNet COORD latent was ~10–100 — a fixed +1.0 broke SE3).
+    xmax = float(summary_sorted["dispersion"].max()) if len(summary_sorted) else 1.0
+    pad = max(xmax * 0.03, 1e-3)
     for i, (_, r) in enumerate(summary_sorted.iterrows()):
-        ax.text(r["dispersion"] + 1.0, i,
+        ax.text(r["dispersion"] + pad, i,
                 f" n={r['n_chains']}, {r['n_kinases']} kinases",
                 va="center", fontsize=9, color="0.25")
     ax.set_yticks(range(len(summary_sorted)))
     ax.set_yticklabels(labels, fontsize=10)
     ax.set_xlabel(r"latent dispersion (mean Euclidean distance to centroid)")
-    ax.set_title("Per-drug compactness in v9 latent (lower = tighter)",
+    ax.set_title("Per-drug compactness in SE3 latent (lower = tighter)",
                  loc="left")
+    ax.set_xlim(0, xmax + pad * 12)
     fig.tight_layout()
     for ext in ("png", "pdf"):
         fig.savefig(args.out_dir / f"per_drug_dispersion_bars.{ext}",
