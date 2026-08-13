@@ -184,7 +184,12 @@ def build_addendum_row(row, pdb_dir: Path, ref_specs, ref_flank,
         return None, {"chain_key": chain_key, **{
             k: v for k, v in r.items() if k not in ("ca", "anchors")}}
     ca = r["ca"].astype(np.float32)
-    ca = ca - ca.mean(axis=0)  # match published addendum PDB convention
+    # Keep addendum in the same post-Kabsch BRAF-flank frame as the 5318
+    # base chains. Published v9.1 additionally centred each addendum loop
+    # (ca - ca.mean) which put 1213 chains at the origin and 5318 near
+    # ~194 Å — FoldingNet is not SE(3)-invariant, so that translation
+    # leaked into training. Do not per-chain-centre the base set either:
+    # flank Kabsch already defines the common origin.
     manifest = {
         "chain_key": chain_key,
         "pdb": chain_key[:4],
