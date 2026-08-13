@@ -1,17 +1,20 @@
 """Statistical test: is the Δlatent of a mutation significant against WT spread?
 
-For each (gene, mutation) pair where v9 has both WT and mutant chains:
+Works on any 2-D latent CSV with columns chain_key, gene, z0, z1
+(SE3 DM-AE or otherwise). Distances are in *latent units*; with the
+current SE3 model |z|~O(1), so Δ is typically 0.01–1 (not tens–hundreds
+as in the old coordinate FoldingNet latent).
+
+For each (gene, mutation) pair with both WT and mutant chains:
 
   - Δ_obs = ‖mean(WT) − mean(mut)‖   (Euclidean in 2-D z0,z1)
   - σ_WT   = ((std(WT z0))² + (std(WT z1))²)^0.5
-  - Mahalanobis(mut_centroid; WT distribution) — Δ in units of WT covariance
-  - Permutation test p-value (10,000 shuffles of WT/mut labels)
-  - Bootstrap 95 % CI on Δ_obs
+  - Mahalanobis(mut_centroid; WT distribution)
+  - Permutation test p-value + bootstrap 95 % CI on Δ_obs
 
 Outputs:
   significance_summary.csv  one row per mutation
-  significance_scatter.png  z0/z1 scatter with WT cloud + mutant centroid
-                            + 95% confidence ellipse for each tested mutation
+  significance_scatter.png  panels for significant (default) mutations
 """
 
 from __future__ import annotations
@@ -123,7 +126,7 @@ def plot_one_mutation(ax, wt: np.ndarray, mut: np.ndarray,
     ax.plot([mu[0], mu_mut[0]], [mu[1], mu_mut[1]],
             color="#444", lw=1.8, ls="-")
     title = (f"{gene} {mutation}\n"
-             f"Δ={result['delta_latent']:.1f}, Mahal={result['mahalanobis_sigma']:.2f}σ, "
+             f"Δ={result['delta_latent']:.3f}, Mahal={result['mahalanobis_sigma']:.2f}σ, "
              f"p={result['perm_pvalue']:.4f}")
     ax.set_title(title, fontsize=10)
     ax.set_xlabel("z0"); ax.set_ylabel("z1")
@@ -141,20 +144,33 @@ def main():
     ap.add_argument("--out", required=True, type=Path)
     ap.add_argument("--n-perm", type=int, default=10000)
     ap.add_argument("--n-boot", type=int, default=5000)
+    ap.add_argument("--plot-significant-only", action="store_true", default=True,
+                    help="Only draw panels with perm p<0.05 (default). "
+                         "Avoids the 500+ panel decompression-bomb figure.")
+    ap.add_argument("--plot-all", action="store_true",
+                    help="Plot every tested mutation (can be huge).")
+    ap.add_argument("--max-panels", type=int, default=48,
+                    help="Cap scatter panels (highest Mahalanobis first).")
     args = ap.parse_args()
+    if args.plot_all:
+        args.plot_significant_only = False
 
     args.out.mkdir(parents=True, exist_ok=True)
 
     lat = pd.read_csv(args.latent_csv, keep_default_na=False)
     lat["chain_key"] = lat["chain_key"].astype(str).str.upper()
+    lat["gene"] = lat["gene"].fillna("").astype(str)
     muts = pd.read_csv(args.mutations_csv, keep_default_na=False)
     muts["chain_key"] = muts["chain_key"].astype(str).str.upper()
+    muts["gene"] = muts["gene"].fillna("").astype(str)
     df = muts.merge(lat[["chain_key", "z0", "z1"]],
                     on="chain_key", how="left")
-    df["z0"] = df["z0"].astype(float); df["z1"] = df["z1"].astype(float)
+    df["z0"] = pd.to_numeric(df["z0"], errors="coerce")
+    df["z1"] = pd.to_numeric(df["z1"], errors="coerce")
     df = df[df["z0"].notna() & df["z1"].notna()].copy()
 
-    candidates = pd.read_csv(args.mutation_list_csv)
+    candidates = pd.read_csv(args.mutation_list_csv, keep_default_na=False)
+    candidates["gene"] = candidates["gene"].fillna("").astype(str)
     print(f"Testing {len(candidates)} mutations")
 
     rows = []
@@ -205,25 +221,41 @@ def main():
     show = [c for c in cols if c in res_df.columns]
     print(res_df[show].to_string(index=False))
 
-    # Scatter plot grid: one panel per tested mutation
-    if valid:
-        n = len(valid)
+    # Scatter grid: significant mutations by default (sorted by Mahalanobis).
+    to_plot = valid
+    if args.plot_significant_only:
+        to_plot = [v for v in valid
+                   if bool(v[4].get("significant_perm_p<0.05"))]
+        print(f"Plotting {len(to_plot)} significant (p<0.05) of {len(valid)} "
+              f"tested (pass --plot-all for everything)")
+    to_plot = sorted(to_plot,
+                     key=lambda v: float(v[4].get("mahalanobis_sigma", 0) or 0),
+                     reverse=True)
+    if args.max_panels and len(to_plot) > args.max_panels:
+        print(f"Capping panels at {args.max_panels} "
+              f"(had {len(to_plot)}; highest Mahalanobis kept)")
+        to_plot = to_plot[:args.max_panels]
+
+    if to_plot:
+        n = len(to_plot)
         ncol = min(3, n)
         nrow = (n + ncol - 1) // ncol
         fig, axes = plt.subplots(nrow, ncol, figsize=(5.5 * ncol, 4.5 * nrow),
                                   squeeze=False)
-        for i, (gene, mut, wt, mu_arr, result) in enumerate(valid):
+        for i, (gene, mut, wt, mu_arr, result) in enumerate(to_plot):
             ax = axes[i // ncol, i % ncol]
             plot_one_mutation(ax, wt, mu_arr, gene, mut, result)
-        for j in range(len(valid), nrow * ncol):
+        for j in range(len(to_plot), nrow * ncol):
             axes[j // ncol, j % ncol].axis("off")
         fig.suptitle(
-            "Mutation Δlatent vs WT spread — v9 baseline AE latent",
+            "Mutation Δlatent vs WT spread — SE3 DM-AE latent (unit scale)",
             fontsize=14, y=1.005)
         fig.tight_layout()
         fig.savefig(args.out / "significance_scatter.png", dpi=200,
                     bbox_inches="tight")
         plt.close(fig)
+    else:
+        print("No panels to plot (no significant mutations, or empty list).")
 
 
 if __name__ == "__main__":

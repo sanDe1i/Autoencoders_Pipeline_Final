@@ -1,31 +1,16 @@
-"""Enumerate all PDB-annotated mutations in v9 and run M1 + significance on each.
+"""Enumerate PDB-annotated mutations and test WT vs mutant centroid shift in latent.
 
-Reads v9_chain_mutations.csv (PDB-header-extracted annotations) and the
-v9 latent CSV. For every (gene, mutation) pair with n_mutant >= 2 chains
-in v9:
+Reads chain-level mutation annotations + a 2-D latent CSV (SE3 DM-AE:
+chain_key, gene, z0, z1). Absolute Δlatent is in latent units (~O(0.1)
+for SE3); prefer Mahalanobis / permutation p when comparing to older
+coordinate-latent runs whose |z| was ~100× larger.
 
-  - normalises mutation tokens from title_mutation_hits, seqadv_mutations,
-    and remark_999_mutation_lines into "X{N}Y" form
-  - M1: verifies the WT residue at position N matches the UniProt canonical
-    sequence of that gene's reviewed human kinase
-  - Significance: permutation test + Mahalanobis distance + bootstrap CI
-    on the WT vs mutant latent centroid distance
+For every (gene, mutation) with enough mutant and WT chains:
+  - M1: UniProt canonical WT residue check (needs network; --skip-m1 to skip)
+  - permutation / Mahalanobis / bootstrap on WT vs mutant centroids
 
-Outputs a single table v9_mutation_validation_skeleton.csv with all of:
-  gene, mutation, n_wt_chains, n_mut_chains, n_mut_pdbs,
-  m1_uniprot_acc, m1_canonical_aa, m1_status,
-  wt_z0_mean, wt_z1_mean, mut_z0_mean, mut_z1_mean,
-  delta_latent, delta_in_wt_sigmas, mahalanobis_sigma,
-  perm_pvalue, boot_delta_median, boot_delta_2.5pct, boot_delta_97.5pct,
-  significant_perm_p<0.05, significant_mahal_>chi2(0.99)
-  -- PLACEHOLDER columns for OncoKB join:
-  oncokb_oncogenic, oncokb_level, oncokb_drug_context
-
-Plus an OncoKB-join-ready key column gene_mut_token ("BRAF:V600E").
-
-When the OncoKB TSVs are dropped at manuscript_draft/data/oncokb_static/,
-a downstream join_oncokb_to_skeleton.py will fill in the placeholder
-columns by matching on gene_mut_token.
+Writes v9_mutation_validation_skeleton.csv (OncoKB columns left blank
+until join_oncokb_to_skeleton.py).
 """
 
 from __future__ import annotations
@@ -209,6 +194,13 @@ def main():
     lat = pd.read_csv(args.latent_csv, keep_default_na=False)
     muts["chain_key"] = muts["chain_key"].astype(str).str.upper()
     lat["chain_key"] = lat["chain_key"].astype(str).str.upper()
+    muts["gene"] = muts["gene"].fillna("").astype(str)
+    lat["gene"] = lat["gene"].fillna("").astype(str)
+    if lat["chain_key"].duplicated().any():
+        raise SystemExit("latent CSV has duplicate chain_key")
+    for col in ("z0", "z1"):
+        if col not in lat.columns:
+            raise SystemExit(f"latent CSV missing {col}")
 
     # Enumerate mutations per chain.
     print(f"Parsing mutation tokens from {len(muts)} chains")

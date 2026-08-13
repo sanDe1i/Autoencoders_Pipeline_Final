@@ -13,7 +13,7 @@ user from:
   https://www.oncokb.org/cancer-genes            → "Download as TSV"
   https://www.oncokb.org/curated-genes           → "Download as TSV"
 
-Drop them as-is into ``manuscript_draft/data/oncokb_static/`` and run
+Drop them into ``$PIPELINE/input/stage9/oncokb_static/`` and run
 this script. It fills the OncoKB placeholder columns of the skeleton:
   oncokb_oncogenic, oncokb_highest_sensitive_level,
   oncokb_highest_resistance_level, oncokb_drug_context,
@@ -161,18 +161,28 @@ def main():
         axis=1,
     )
     joined.to_csv(args.out, index=False)
-    n_found = (joined["oncokb_lookup_status"] == "found_static").sum()
+    n_found = int((joined["oncokb_lookup_status"] == "found_static").sum())
     print(f"\nWrote {args.out}  ({len(joined)} rows, {n_found} with OncoKB record)")
 
     # Validation breakdown.
+    # keep_default_na=False leaves True/False as strings — do not compare to bool.
     if "significant_perm_p<0.05" in joined.columns:
-        sig = joined[joined["significant_perm_p<0.05"] == True]
+        sig_col = joined["significant_perm_p<0.05"].map(
+            lambda v: str(v).strip().lower() in {"true", "1", "yes"})
+        sig = joined[sig_col]
         sig_in_oncokb = sig[sig["oncokb_lookup_status"] == "found_static"]
-        print(f"\nSignificant (perm p<0.05): {len(sig)}")
+        print(f"\nSignificant (perm p<0.05) in skeleton: {len(sig)}")
         print(f"  of which in OncoKB:                {len(sig_in_oncokb)}")
         if len(sig_in_oncokb):
-            print(f"  by oncogenic classification:")
-            print(sig_in_oncokb["oncokb_oncogenic"].value_counts().to_string())
+            print("  OncoKB hits among significant:")
+            cols = [c for c in ("gene", "mutation", "perm_pvalue",
+                                "oncokb_level", "oncokb_oncogenic",
+                                "oncokb_drug_context") if c in sig_in_oncokb.columns]
+            print(sig_in_oncokb[cols].to_string(index=False))
+            if "oncokb_oncogenic" in sig_in_oncokb.columns:
+                print("  by oncogenic classification:")
+                print(sig_in_oncokb["oncokb_oncogenic"].value_counts().to_string())
+
 
 
 if __name__ == "__main__":
