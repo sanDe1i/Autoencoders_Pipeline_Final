@@ -92,10 +92,10 @@ def plot_dfg_hist(df: pd.DataFrame, dfg_col: str, out_dir: Path) -> None:
             )
         ax.set_xlabel(col)
         ax.set_ylabel("density")
-        ax.set_title(f"{col} by DFG-spatial")
+        ax.set_title(f"{col} by DFG-spatial state")
         ax.legend(frameon=False, fontsize=8)
         ax.spines[["top", "right"]].set_visible(False)
-    fig.suptitle("SE3 latent marginals by DFG-spatial", y=1.02)
+    fig.suptitle("Latent-coordinate distributions by DFG-spatial state", y=1.02)
     fig.tight_layout()
     for ext in ("png", "pdf"):
         fig.savefig(out_dir / f"latent_z0_z1_dfg_distribution.{ext}",
@@ -118,7 +118,7 @@ def plot_by_dfg(df: pd.DataFrame, dfg_col: str, out_dir: Path) -> None:
                    linewidths=0, c="#9d9d9d", label=f"unlabeled (n={len(unlabeled)})")
     ax.set_xlabel("z0")
     ax.set_ylabel("z1")
-    ax.set_title("SE3 latent colored by DFG-spatial")
+    ax.set_title("Autoencoder latent space coloured by DFG-spatial state")
     ax.legend(frameon=False, fontsize=8, markerscale=2)
     ax.spines[["top", "right"]].set_visible(False)
     fig.tight_layout()
