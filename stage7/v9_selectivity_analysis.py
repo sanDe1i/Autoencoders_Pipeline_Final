@@ -311,7 +311,7 @@ def main():
         ax.legend(fontsize=8, frameon=False, loc="best")
     for k in range(n_lig, nrow*ncol):
         axes[k // ncol, k % ncol].axis("off")
-    fig.suptitle("(C) Ligand-type latent footprints, coloured by Kincore DFG state",
+    fig.suptitle("Kincore ligand-type distributions in the autoencoder latent space",
                  fontsize=14, y=1.005)
     fig.tight_layout()
     fig.savefig(fig_dir / "ligand_type_latent_facets.png")

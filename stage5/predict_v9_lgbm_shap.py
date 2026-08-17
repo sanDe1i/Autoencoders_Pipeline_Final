@@ -313,11 +313,15 @@ def main():
         axes[j].set_xlabel(f"Actual {name}")
         axes[j].set_ylabel(f"Predicted {name}")
         axes[j].set_title(f"{name}: R² = {r2:.3f}")
-    fig.suptitle(
-        f"LightGBM predicting SE3 latent from non-loop conserved distances\n"
-        f"({claim})",
-        fontsize=13,
-    )
+    if args.split == "ae":
+        scatter_title = (
+            "Prediction from conserved-core distances for held-out genes"
+        )
+    else:
+        scatter_title = (
+            "Prediction from conserved-core distances under random chain holdout"
+        )
+    fig.suptitle(scatter_title, fontsize=13)
     fig.tight_layout()
     fig.savefig(fig_dir / "lgbm_predicted_vs_actual.png")
     plt.close(fig)

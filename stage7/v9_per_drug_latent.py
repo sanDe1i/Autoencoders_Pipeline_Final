@@ -311,7 +311,7 @@ def main():
                    linewidth=1.5, zorder=5)
     ax.set_xlabel("z0")
     ax.set_ylabel("z1")
-    ax.set_title("Per-drug latent footprints (SE3 DM-AE)", loc="left")
+    ax.set_title("Selected ligand footprints in the autoencoder latent space", loc="left")
     ax.legend(loc="upper left", fontsize=8, markerscale=0.9,
               bbox_to_anchor=(1.01, 1.0))
     fig.tight_layout()

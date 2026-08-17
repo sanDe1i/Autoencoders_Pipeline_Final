@@ -229,23 +229,21 @@ def plot_residue_vs_pair(res_df_all: pd.DataFrame, pair_df_all: pd.DataFrame,
         "_meanabs", "") + " ↔ " + df["method_b"].str.replace(
         "lgbm_", "").str.replace("_meanabs", "")
 
-    fig, ax = plt.subplots(figsize=(9, 6))
+    fig, ax = plt.subplots(figsize=(9.5, 6))
     x = np.arange(len(df))
     ax.barh(x - 0.2, df["jaccard_top20"], height=0.4,
-             color="#C62828", label="Pair-level top-20")
+             color="#E5A8A8", label="Pair-level top-20")
     ax.barh(x + 0.2, df["jaccard_top10_resi"], height=0.4,
-             color="#1565C0", label="Residue-level top-10 (sites touched)")
+             color="#9CBAD9", label="Residue-level top-10")
     ax.set_yticks(x); ax.set_yticklabels(df["label"], fontsize=9)
     ax.set_xlabel("Jaccard overlap (z0 + z1 averaged)")
     ax.set_xlim(0, 1)
-    ax.set_title("Pair-level vs residue-level FI agreement\n"
-                  "(higher residue-level = methods agree on which sites\n"
-                  "matter, even when they pick different exact pair "
-                  "representatives)",
-                  fontsize=11)
-    ax.legend(frameon=False, loc="lower right")
+    ax.set_title("Pair-level and residue-level feature-importance agreement",
+                 fontsize=11)
+    ax.legend(frameon=False, loc="lower left", fontsize=9,
+              bbox_to_anchor=(1.02, 0.0))
     ax.invert_yaxis()
-    fig.tight_layout()
+    fig.subplots_adjust(right=0.72)
     for ext in ("png", "pdf"):
         fig.savefig(out / f"fi_residue_vs_pair_jaccard.{ext}",
                     dpi=200, bbox_inches="tight")

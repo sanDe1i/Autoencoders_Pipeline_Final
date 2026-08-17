@@ -190,7 +190,7 @@ def main():
                 label=f"S218D+S222D (n={len(pm)})")
     axA.set_xlabel("z0")
     axA.set_ylabel("z1")
-    axA.set_title("A.  global SE3 latent, MAP2K1 chains highlighted",
+    axA.set_title("A. MAP2K1 chains in the global autoencoder latent space",
                   loc="left")
     axA.legend(loc="lower right", fontsize=9, markerscale=1.4)
 
@@ -253,7 +253,7 @@ def main():
 
     axB.set_xlabel("z0")
     axB.set_ylabel("z1")
-    axB.set_title("B.  WT → mutant displacement in SE3 latent",
+    axB.set_title("B. MAP2K1 wild-type/other-to-mutant displacement",
                   loc="left")
     axB.legend(loc="upper right", fontsize=9, markerscale=1.0)
 

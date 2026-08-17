@@ -207,7 +207,7 @@ def plot_consensus_residues(df_z0: pd.DataFrame, df_z1: pd.DataFrame,
             label="z1 consensus")
     ax.set_xlabel("BRAF residue (Kincore numbering)")
     ax.set_ylabel(f"Consensus score (1/mean-rank among top {top})")
-    ax.set_title("Per-residue consensus FI across the 4 tree-based methods")
+    ax.set_title("Residue-level consensus feature importance")
     ax.legend(frameon=False)
     fig.tight_layout()
     for ext in ("png", "pdf"):
